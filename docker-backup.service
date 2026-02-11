@@ -1,0 +1,14 @@
+[Unit]
+Description=Docker Compose Backup
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/docker-backup/docker-backup
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,469 @@
+#!/usr/bin/env bash
+# docker-backup - Main backup orchestrator for Docker Compose services
+#
+# Usage:
+#   docker-backup [OPTIONS]
+#   docker-backup restore [OPTIONS]
+#
+# Options:
+#   --config FILE     Path to global config (default: /opt/docker-backup/docker-backup.conf)
+#   --service NAME    Back up only the named service
+#   --dry-run         Walk through all steps without actually archiving/transferring
+#   --no-transfer     Skip rsync transfer to remote
+#   --no-prune        Skip GFS retention pruning
+#   --no-notify       Skip webhook notification
+#   -v, --verbose     Verbose output
+#   -h, --help        Show this help
+#
+# Restore mode:
+#   docker-backup restore --list [SERVICE]
+#   docker-backup restore --file FILENAME [--target DIR]
+
+set -euo pipefail
+
+# --- Constants ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_NAME="$(basename "$0")"
+DATE_STR="$(date +%Y-%m-%d)"
+LOG_TAG="docker-backup"
+
+# --- Defaults ---
+CONFIG_FILE="/opt/docker-backup/docker-backup.conf"
+SINGLE_SERVICE=""
+DRY_RUN=false
+NO_TRANSFER=false
+NO_PRUNE=false
+NO_NOTIFY=false
+VERBOSE=false
+
+# Subcommand
+SUBCOMMAND=""
+RESTORE_LIST=false
+RESTORE_FILE=""
+RESTORE_TARGET=""
+
+# --- Tracking ---
+declare -a BACKUP_RESULTS=()
+declare -a BACKUP_ERRORS=()
+TOTAL_BACKUP_SIZE="0"
+TOTAL_DURATION=0
+
+# --- Logging ---
+log_info()  { echo "[$(date +%H:%M:%S)] [INFO]  $*" | tee -a /dev/stderr | logger -t "$LOG_TAG" -p user.info 2>/dev/null || true; }
+log_warn()  { echo "[$(date +%H:%M:%S)] [WARN]  $*" | tee -a /dev/stderr | logger -t "$LOG_TAG" -p user.warning 2>/dev/null || true; }
+log_error() { echo "[$(date +%H:%M:%S)] [ERROR] $*" | tee -a /dev/stderr | logger -t "$LOG_TAG" -p user.err 2>/dev/null || true; }
+
+# --- Source library files ---
+for lib in config database archive encrypt transfer retention notify restore; do
+    lib_file="$SCRIPT_DIR/lib/${lib}.sh"
+    if [[ -f "$lib_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$lib_file"
+    else
+        echo "ERROR: Missing library: $lib_file" >&2
+        exit 1
+    fi
+done
+
+# --- Argument Parsing ---
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            restore)
+                SUBCOMMAND="restore"
+                shift
+                ;;
+            --config)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
+            --service)
+                SINGLE_SERVICE="$2"
+                shift 2
+                ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --no-transfer)
+                NO_TRANSFER=true
+                shift
+                ;;
+            --no-prune)
+                NO_PRUNE=true
+                shift
+                ;;
+            --no-notify)
+                NO_NOTIFY=true
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            --list)
+                RESTORE_LIST=true
+                # Optional service filter
+                if [[ ${2:-} ]] && [[ ! "$2" =~ ^-- ]]; then
+                    SINGLE_SERVICE="$2"
+                    shift
+                fi
+                shift
+                ;;
+            --file)
+                RESTORE_FILE="$2"
+                shift 2
+                ;;
+            --target)
+                RESTORE_TARGET="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                exit 1
+                ;;
+        esac
+    done
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  docker-backup [OPTIONS]
+  docker-backup restore --list [SERVICE]
+  docker-backup restore --file FILENAME [--target DIR]
+
+Backup options:
+  --config FILE     Path to global config (default: /opt/docker-backup/docker-backup.conf)
+  --service NAME    Back up only the named service
+  --dry-run         Walk through all steps without archiving/transferring
+  --no-transfer     Skip rsync transfer to remote
+  --no-prune        Skip GFS retention pruning
+  --no-notify       Skip webhook notification
+  -v, --verbose     Verbose output
+  -h, --help        Show this help
+
+Restore options:
+  --list [SERVICE]  List available backups on remote (optionally filter by service)
+  --file FILENAME   Restore a specific backup file
+  --target DIR      Extract to DIR (default: /tmp/docker-backup-restore)
+EOF
+}
+
+# --- Backup a single service ---
+backup_service() {
+    local service_dir="$1"
+    local service_name
+    service_name="$(basename "$service_dir")"
+
+    log_info "=== Backing up: $service_name ==="
+
+    local service_start
+    service_start=$(date +%s)
+    local service_error=false
+
+    # Load per-service config
+    load_service_config "$service_dir"
+
+    # Pre-backup hook
+    if [[ -n "$PRE_BACKUP_HOOK" ]]; then
+        log_info "Running pre-backup hook"
+        if $DRY_RUN; then
+            log_info "  [DRY RUN] Would run: $PRE_BACKUP_HOOK"
+        else
+            if ! eval "$PRE_BACKUP_HOOK"; then
+                log_warn "Pre-backup hook failed (continuing)"
+            fi
+        fi
+    fi
+
+    # Stop containers if stop-start mode
+    local compose_file=""
+    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        if [[ -f "$service_dir/$f" ]]; then
+            compose_file="$service_dir/$f"
+            break
+        fi
+    done
+
+    if [[ "$BACKUP_MODE" == "stop-start" ]]; then
+        log_info "Stopping containers (stop-start mode)"
+        if $DRY_RUN; then
+            log_info "  [DRY RUN] Would run: docker compose -f $compose_file stop"
+        else
+            if ! docker compose -f "$compose_file" stop 2>/tmp/compose_err; then
+                log_error "Failed to stop containers: $(cat /tmp/compose_err)"
+                service_error=true
+            fi
+        fi
+    fi
+
+    # Database dumps
+    if $DRY_RUN; then
+        local db_defs
+        db_defs="$(get_db_definitions)"
+        if [[ -n "$db_defs" ]]; then
+            log_info "[DRY RUN] Would dump databases:"
+            while IFS='|' read -r container db_type db_names; do
+                log_info "  $container ($db_type): $db_names"
+            done <<< "$db_defs"
+        fi
+    else
+        if ! dump_databases "$service_dir"; then
+            log_error "Database dump errors occurred for $service_name"
+            service_error=true
+        fi
+    fi
+
+    # Create archive
+    local archive_name
+    archive_name="$(archive_filename "$service_name" "$DATE_STR")"
+    local archive_path=""
+
+    if $DRY_RUN; then
+        log_info "[DRY RUN] Would create archive: $archive_name"
+        log_info "  Source: $service_dir"
+        if [[ -n "$EXCLUDE" ]]; then
+            log_info "  Excludes: $EXCLUDE"
+        fi
+    else
+        archive_path="$(create_archive "$service_dir" "$BACKUP_LOCAL_STAGING" "$archive_name")"
+        if [[ $? -ne 0 ]] || [[ -z "$archive_path" ]]; then
+            log_error "Archive creation failed for $service_name"
+            service_error=true
+        fi
+    fi
+
+    # Restart containers if stop-start mode
+    if [[ "$BACKUP_MODE" == "stop-start" ]]; then
+        log_info "Starting containers (stop-start mode)"
+        if $DRY_RUN; then
+            log_info "  [DRY RUN] Would run: docker compose -f $compose_file start"
+        else
+            if ! docker compose -f "$compose_file" start 2>/tmp/compose_err; then
+                log_error "Failed to start containers: $(cat /tmp/compose_err)"
+                service_error=true
+            fi
+        fi
+    fi
+
+    # Post-backup hook
+    if [[ -n "$POST_BACKUP_HOOK" ]]; then
+        log_info "Running post-backup hook"
+        if $DRY_RUN; then
+            log_info "  [DRY RUN] Would run: $POST_BACKUP_HOOK"
+        else
+            if ! eval "$POST_BACKUP_HOOK"; then
+                log_warn "Post-backup hook failed (continuing)"
+            fi
+        fi
+    fi
+
+    # Encrypt
+    if [[ -n "$archive_path" ]] && [[ -f "$archive_path" ]]; then
+        local encrypted_path="${archive_path}.age"
+        if $DRY_RUN; then
+            log_info "[DRY RUN] Would encrypt: $archive_name -> ${archive_name}.age"
+        else
+            if encrypt_file "$archive_path" "$encrypted_path" >/dev/null; then
+                # Remove unencrypted archive
+                rm -f "$archive_path"
+            else
+                log_error "Encryption failed for $service_name"
+                service_error=true
+            fi
+        fi
+    elif ! $DRY_RUN; then
+        log_info "[DRY RUN] Would encrypt: $archive_name -> ${archive_name}.age"
+    fi
+
+    # Clean up database dumps
+    if ! $DRY_RUN; then
+        cleanup_dumps "$service_dir"
+    fi
+
+    # Track results
+    local service_end
+    service_end=$(date +%s)
+    local service_duration=$((service_end - service_start))
+
+    if $DRY_RUN; then
+        BACKUP_RESULTS+=("$service_name: [DRY RUN] (${service_duration}s)")
+    elif $service_error; then
+        local size="N/A"
+        if [[ -f "${BACKUP_LOCAL_STAGING}/${archive_name}.age" ]]; then
+            size="$(du -h "${BACKUP_LOCAL_STAGING}/${archive_name}.age" | cut -f1)"
+        fi
+        BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s) [ERRORS]")
+        BACKUP_ERRORS+=("$service_name: check logs for details")
+    else
+        local size="unknown"
+        if [[ -f "${BACKUP_LOCAL_STAGING}/${archive_name}.age" ]]; then
+            size="$(du -h "${BACKUP_LOCAL_STAGING}/${archive_name}.age" | cut -f1)"
+        fi
+        BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s)")
+    fi
+
+    log_info "=== Done: $service_name (${service_duration}s) ==="
+    echo ""
+}
+
+# --- Main backup flow ---
+run_backup() {
+    local overall_start
+    overall_start=$(date +%s)
+
+    log_info "========================================="
+    log_info "Docker Backup starting: $DATE_STR"
+    log_info "========================================="
+
+    if $DRY_RUN; then
+        log_info "*** DRY RUN MODE - no changes will be made ***"
+        echo ""
+    fi
+
+    # Discover services
+    local services
+    if [[ -n "$SINGLE_SERVICE" ]]; then
+        local service_path="$BACKUP_SOURCE_DIR/$SINGLE_SERVICE"
+        if [[ ! -d "$service_path" ]]; then
+            log_error "Service directory not found: $service_path"
+            exit 1
+        fi
+        services="$service_path"
+    else
+        services="$(discover_services "$BACKUP_SOURCE_DIR")"
+    fi
+
+    if [[ -z "$services" ]]; then
+        log_error "No services found to back up"
+        exit 1
+    fi
+
+    local service_count
+    service_count="$(echo "$services" | wc -l)"
+    log_info "Found $service_count service(s) to back up"
+    echo ""
+
+    # Create staging directory
+    mkdir -p "$BACKUP_LOCAL_STAGING"
+
+    # Back up each service
+    while IFS= read -r service_dir; do
+        [[ -z "$service_dir" ]] && continue
+        backup_service "$service_dir"
+    done <<< "$services"
+
+    # Calculate total size of staged archives
+    if [[ -d "$BACKUP_LOCAL_STAGING" ]]; then
+        TOTAL_BACKUP_SIZE="$(du -sh "$BACKUP_LOCAL_STAGING" 2>/dev/null | cut -f1)"
+    fi
+
+    # Transfer
+    if ! $NO_TRANSFER && ! $DRY_RUN; then
+        log_info "========================================="
+        log_info "Transferring archives to remote"
+        log_info "========================================="
+        if ! transfer_archives "$BACKUP_LOCAL_STAGING"; then
+            BACKUP_ERRORS+=("Transfer: rsync to $REMOTE_HOST failed")
+        fi
+        echo ""
+    elif $DRY_RUN; then
+        log_info "[DRY RUN] Would transfer archives to $REMOTE_HOST:$REMOTE_PATH"
+    fi
+
+    # GFS Pruning
+    if ! $NO_PRUNE && ! $DRY_RUN; then
+        log_info "========================================="
+        log_info "Applying retention policy"
+        log_info "========================================="
+        if ! apply_retention; then
+            BACKUP_ERRORS+=("Retention: pruning failed")
+        fi
+        echo ""
+    elif $DRY_RUN; then
+        log_info "[DRY RUN] Would apply GFS retention (daily=$RETAIN_DAILY, weekly=$RETAIN_WEEKLY, monthly=$RETAIN_MONTHLY)"
+    fi
+
+    # Cleanup staging
+    if ! $DRY_RUN; then
+        log_info "Cleaning up staging: $BACKUP_LOCAL_STAGING"
+        rm -rf "$BACKUP_LOCAL_STAGING"
+    fi
+
+    # Summary
+    local overall_end
+    overall_end=$(date +%s)
+    TOTAL_DURATION=$((overall_end - overall_start))
+
+    log_info "========================================="
+    log_info "Backup complete in ${TOTAL_DURATION}s"
+    log_info "Services: ${#BACKUP_RESULTS[@]}, Errors: ${#BACKUP_ERRORS[@]}"
+    log_info "Total size: ${TOTAL_BACKUP_SIZE}"
+    log_info "========================================="
+
+    # Notify
+    if ! $NO_NOTIFY; then
+        build_summary
+    fi
+
+    # Exit with error if any errors occurred
+    if [[ ${#BACKUP_ERRORS[@]} -gt 0 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# --- Restore flow ---
+run_restore() {
+    if $RESTORE_LIST; then
+        restore_list "$SINGLE_SERVICE"
+        return $?
+    fi
+
+    if [[ -n "$RESTORE_FILE" ]]; then
+        local target="${RESTORE_TARGET:-/tmp/docker-backup-restore}"
+        restore_backup "$RESTORE_FILE" "$target"
+        return $?
+    fi
+
+    echo "Restore mode requires --list or --file. See --help." >&2
+    return 1
+}
+
+# --- Entry point ---
+main() {
+    parse_args "$@"
+
+    # Load global config
+    if [[ -f "$CONFIG_FILE" ]]; then
+        load_global_config "$CONFIG_FILE"
+    elif [[ -f "$SCRIPT_DIR/docker-backup.conf" ]]; then
+        CONFIG_FILE="$SCRIPT_DIR/docker-backup.conf"
+        load_global_config "$CONFIG_FILE"
+    else
+        echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+        echo "Tried: $CONFIG_FILE, $SCRIPT_DIR/docker-backup.conf" >&2
+        exit 1
+    fi
+
+    case "$SUBCOMMAND" in
+        restore)
+            run_restore
+            ;;
+        "")
+            run_backup
+            ;;
+        *)
+            echo "Unknown subcommand: $SUBCOMMAND" >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
