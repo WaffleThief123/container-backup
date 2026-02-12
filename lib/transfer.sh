@@ -4,13 +4,14 @@
 # Build the SSH command string used by rsync and remote operations.
 # Usage: prod_ssh_cmd
 prod_ssh_cmd() {
-    echo "ssh -T -n -i ${SSH_KEY} -p ${PRODUCTION_PORT} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+    echo "ssh -T -i ${SSH_KEY} -p ${PRODUCTION_PORT} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 }
 
 # Execute a command on the production server via SSH.
+# Uses -n to prevent reading stdin (safe for use inside while-read loops).
 # Usage: prod_ssh "docker ps" or prod_ssh "ls -la /opt/docker"
 prod_ssh() {
-    $(prod_ssh_cmd) "${PRODUCTION_USER}@${PRODUCTION_HOST}" "$@"
+    $(prod_ssh_cmd) -n "${PRODUCTION_USER}@${PRODUCTION_HOST}" "$@"
 }
 
 # Pull a single archive from production staging to local destination via rsync.
