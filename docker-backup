@@ -25,7 +25,7 @@ set -euo pipefail
 # --- Constants ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "$0")"
-DATE_STR="$(date +%Y-%m-%d)"
+DATE_STR=""  # set in run_backup from production server time
 LOG_TAG="docker-backup"
 
 # --- Defaults ---
@@ -318,6 +318,9 @@ backup_service() {
 run_backup() {
     local overall_start
     overall_start=$(date +%s)
+
+    # Fetch timestamp from production server's local time
+    DATE_STR="$(prod_ssh "date +%Y-%m-%d_%H%M%S" 2>/dev/null)" || DATE_STR="$(date +%Y-%m-%d_%H%M%S)"
 
     log_info "========================================="
     log_info "Docker Backup starting: $DATE_STR"

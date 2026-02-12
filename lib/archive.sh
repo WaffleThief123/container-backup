@@ -54,11 +54,11 @@ create_archive() {
     fi
 }
 
-# Generate archive filename for a service and date.
-# Usage: archive_filename myapp 2026-02-11
-# Output: myapp-2026-02-11.tar.zst
+# Generate archive filename for a service and datetime.
+# Usage: archive_filename myapp 2026-02-11_210300
+# Output: myapp-2026-02-11_210300.tar.zst
 archive_filename() {
     local service_name="$1"
-    local date_str="${2:-$(date +%Y-%m-%d)}"
+    local date_str="${2:-$(date +%Y-%m-%d_%H%M%S)}"
     echo "${service_name}-${date_str}.tar.zst"
 }

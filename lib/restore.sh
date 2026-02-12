@@ -64,7 +64,7 @@ restore_backup() {
     # Step 3: Check for database dumps
     echo "Step 3/3: Checking for database dumps..."
     local service_name
-    service_name="$(echo "$filename" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.tar\.zst\.age$//')"
+    service_name="$(echo "$filename" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{6\}\.tar\.zst\.age$//')"
     local dump_dir="$target_dir/$service_name/_dumps"
 
     if [[ -d "$dump_dir" ]]; then

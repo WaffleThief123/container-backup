@@ -26,7 +26,8 @@ day_of_week() {
 }
 
 # Apply GFS retention policy on the local backup directory.
-# Naming convention: servicename-YYYY-MM-DD.tar.zst.age
+# Naming convention: servicename-YYYY-MM-DD_HHMMSS.tar.zst.age
+# GFS decisions are based on the date portion (YYYY-MM-DD) only.
 # Usage: apply_retention
 apply_retention() {
     local today
@@ -45,7 +46,7 @@ apply_retention() {
 
     # Extract unique service names
     local services
-    services="$(echo "$local_files" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.tar\.zst\.age$//' | sort -u)"
+    services="$(echo "$local_files" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{6\}\.tar\.zst\.age$//' | sort -u)"
 
     local total_pruned=0
 
@@ -76,14 +77,14 @@ prune_service_backups() {
         return
     fi
 
-    # Build the set of dates to keep
+    # Build the set of dates to keep (keyed on YYYY-MM-DD only)
     local -A keep_dates
 
-    # Extract all dates for this service
+    # Extract dates from filenames (strip time portion for GFS decisions)
     local dates
-    dates="$(echo "$service_files" | sed "s/^${service}-//;s/\.tar\.zst\.age$//" | sort -r)"
+    dates="$(echo "$service_files" | sed "s/^${service}-//;s/_[0-9]\{6\}\.tar\.zst\.age$//" | sort -ru)"
 
-    # Daily: keep the most recent N
+    # Daily: keep the most recent N unique dates
     local daily_count=0
     while IFS= read -r d; do
         [[ -z "$d" ]] && continue
@@ -93,7 +94,7 @@ prune_service_backups() {
         fi
     done <<< "$dates"
 
-    # Weekly: keep the most recent N Sundays (day of week = 0)
+    # Weekly: keep the most recent N Sundays (day of week = 7)
     local weekly_count=0
     while IFS= read -r d; do
         [[ -z "$d" ]] && continue
@@ -122,13 +123,13 @@ prune_service_backups() {
         fi
     done <<< "$dates"
 
-    # Determine which files to delete
+    # Determine which files to delete (extract date portion from filename)
     local pruned=0
     local -a to_delete=()
     while IFS= read -r f; do
         [[ -z "$f" ]] && continue
         local file_date
-        file_date="$(echo "$f" | sed "s/^${service}-//;s/\.tar\.zst\.age$//")"
+        file_date="$(echo "$f" | sed "s/^${service}-//;s/_[0-9]\{6\}\.tar\.zst\.age$//")"
 
         if [[ -z "${keep_dates[$file_date]+_}" ]]; then
             to_delete+=("$f")
