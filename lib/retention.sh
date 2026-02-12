@@ -25,7 +25,7 @@ day_of_week() {
     fi
 }
 
-# Apply GFS retention policy on the remote server.
+# Apply GFS retention policy on the local backup directory.
 # Naming convention: servicename-YYYY-MM-DD.tar.zst.age
 # Usage: apply_retention
 apply_retention() {
@@ -34,26 +34,25 @@ apply_retention() {
 
     log_info "Applying GFS retention policy (daily=$RETAIN_DAILY, weekly=$RETAIN_WEEKLY, monthly=$RETAIN_MONTHLY)"
 
-    # Get list of all backup files on remote
-    local remote_files
-    remote_files="$($(ssh_cmd) "${REMOTE_USER}@${REMOTE_HOST}" \
-        "ls -1 '${REMOTE_PATH}/' 2>/dev/null" 2>/dev/null | grep '\.tar\.zst\.age$')"
+    # Get list of all backup files in local BACKUP_DIR
+    local local_files
+    local_files="$(ls -1 "${BACKUP_DIR}/" 2>/dev/null | grep '\.tar\.zst\.age$')"
 
-    if [[ -z "$remote_files" ]]; then
-        log_info "No backups found on remote, nothing to prune"
+    if [[ -z "$local_files" ]]; then
+        log_info "No backups found in $BACKUP_DIR, nothing to prune"
         return 0
     fi
 
     # Extract unique service names
     local services
-    services="$(echo "$remote_files" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.tar\.zst\.age$//' | sort -u)"
+    services="$(echo "$local_files" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.tar\.zst\.age$//' | sort -u)"
 
     local total_pruned=0
 
     while IFS= read -r service; do
         [[ -z "$service" ]] && continue
         local pruned
-        pruned="$(prune_service_backups "$service" "$remote_files")"
+        pruned="$(prune_service_backups "$service" "$local_files")"
         total_pruned=$((total_pruned + pruned))
     done <<< "$services"
 
@@ -90,7 +89,7 @@ prune_service_backups() {
         [[ -z "$d" ]] && continue
         if [[ $daily_count -lt $RETAIN_DAILY ]]; then
             keep_dates["$d"]="daily"
-            ((daily_count++))
+            daily_count=$((daily_count + 1))
         fi
     done <<< "$dates"
 
@@ -102,7 +101,7 @@ prune_service_backups() {
         dow="$(day_of_week "$d")" # 7 = Sunday
         if [[ "$dow" == "7" ]] && [[ $weekly_count -lt $RETAIN_WEEKLY ]]; then
             keep_dates["$d"]="${keep_dates[$d]:+${keep_dates[$d]}+}weekly"
-            ((weekly_count++))
+            weekly_count=$((weekly_count + 1))
         fi
     done <<< "$dates"
 
@@ -119,7 +118,7 @@ prune_service_backups() {
         if [[ "$day_of_month" == "01" ]] && [[ ! "$seen_months" == *"$month_key"* ]] && [[ $monthly_count -lt $RETAIN_MONTHLY ]]; then
             keep_dates["$d"]="${keep_dates[$d]:+${keep_dates[$d]}+}monthly"
             seen_months="$seen_months $month_key"
-            ((monthly_count++))
+            monthly_count=$((monthly_count + 1))
         fi
     done <<< "$dates"
 
@@ -133,23 +132,17 @@ prune_service_backups() {
 
         if [[ -z "${keep_dates[$file_date]+_}" ]]; then
             to_delete+=("$f")
-            ((pruned++))
+            pruned=$((pruned + 1))
         fi
     done <<< "$service_files"
 
-    # Delete files on remote
+    # Delete files locally
     if [[ ${#to_delete[@]} -gt 0 ]]; then
-        local delete_cmd="cd '${REMOTE_PATH}' && rm -f"
-        for f in "${to_delete[@]}"; do
-            delete_cmd+=" '$f'"
-        done
-
         log_info "Pruning $service: removing ${#to_delete[@]} old backup(s)"
         for f in "${to_delete[@]}"; do
             log_info "  Removing: $f"
+            rm -f "${BACKUP_DIR}/$f"
         done
-
-        $(ssh_cmd) "${REMOTE_USER}@${REMOTE_HOST}" "$delete_cmd" 2>/dev/null
     fi
 
     echo "$pruned"

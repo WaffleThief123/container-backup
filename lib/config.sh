@@ -17,18 +17,17 @@ load_global_config() {
 
     # Validate required settings
     local required_vars=(
-        BACKUP_SOURCE_DIR
-        BACKUP_LOCAL_STAGING
-        REMOTE_HOST
-        REMOTE_USER
-        REMOTE_PATH
+        PRODUCTION_HOST
+        PRODUCTION_USER
+        PRODUCTION_SOURCE_DIR
         SSH_KEY
+        BACKUP_DIR
         AGE_RECIPIENT
     )
 
     local missing=()
     for var in "${required_vars[@]}"; do
-        if [[ -z "${!var}" ]]; then
+        if [[ -z "${!var:-}" ]]; then
             missing+=("$var")
         fi
     done
@@ -39,17 +38,22 @@ load_global_config() {
     fi
 
     # Apply defaults for optional settings
-    REMOTE_PORT="${REMOTE_PORT:-22}"
+    PRODUCTION_PORT="${PRODUCTION_PORT:-22}"
+    PRODUCTION_STAGING_DIR="${PRODUCTION_STAGING_DIR:-/var/tmp/docker-backup-staging}"
+    BACKUP_STAGING_DIR="${BACKUP_STAGING_DIR:-/var/tmp/docker-backup-staging}"
     RETAIN_DAILY="${RETAIN_DAILY:-7}"
     RETAIN_WEEKLY="${RETAIN_WEEKLY:-4}"
     RETAIN_MONTHLY="${RETAIN_MONTHLY:-3}"
     COMPRESSION_LEVEL="${COMPRESSION_LEVEL:-3}"
     WEBHOOK_TYPE="${WEBHOOK_TYPE:-discord}"
+    WEBHOOK_URL="${WEBHOOK_URL:-}"
+    TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+    AGE_KEY_FILE="${AGE_KEY_FILE:-}"
 
     return 0
 }
 
-# Load per-service .backup.conf
+# Load per-service .backup.conf from production via SSH
 # Sets service-level variables with defaults for anything not specified.
 # Usage: load_service_config /opt/docker/myapp
 load_service_config() {
@@ -65,10 +69,12 @@ load_service_config() {
     # Clear any previous DB_* variables
     unset_db_vars
 
-    if [[ -f "$config_file" ]]; then
-        # shellcheck source=/dev/null
-        source "$config_file"
-        log_info "Loaded config: $config_file"
+    local remote_conf
+    remote_conf="$(prod_ssh "cat '$config_file' 2>/dev/null")" || true
+
+    if [[ -n "$remote_conf" ]]; then
+        eval "$remote_conf"
+        log_info "Loaded config: $config_file (from production)"
     else
         log_info "No .backup.conf for $(basename "$service_dir"), using defaults"
     fi
@@ -86,7 +92,7 @@ load_service_config() {
 # Clear all DB_N_* variables from previous service config
 unset_db_vars() {
     local var
-    for var in $(compgen -v | grep -E '^DB_[0-9]+_'); do
+    for var in $(compgen -v | grep -E '^DB_[0-9]+_' || true); do
         unset "$var"
     done
 }
@@ -118,42 +124,30 @@ get_db_definitions() {
     done
 }
 
-# Build tar exclude arguments from the EXCLUDE config value.
-# Usage: build_exclude_args "$EXCLUDE"
-# Outputs one --exclude=PATTERN per line
-build_exclude_args() {
-    local exclude_str="$1"
-    [[ -z "$exclude_str" ]] && return
-
-    local IFS=','
-    for pattern in $exclude_str; do
-        pattern="$(echo "$pattern" | xargs)"  # trim whitespace
-        [[ -n "$pattern" ]] && echo "--exclude=$pattern"
-    done
-}
-
-# Discover docker-compose services under the source directory.
+# Discover docker-compose services on the production server via SSH.
 # Prints one service directory path per line.
+# Uses a single SSH call to check all directories at once.
 discover_services() {
     local source_dir="$1"
 
-    if [[ ! -d "$source_dir" ]]; then
-        log_error "Source directory does not exist: $source_dir"
-        return 1
+    local remote_services
+    remote_services="$(prod_ssh "
+        for dir in '${source_dir}'/*/; do
+            [ -d \"\$dir\" ] || continue
+            if [ -f \"\$dir/docker-compose.yml\" ] || \
+               [ -f \"\$dir/docker-compose.yaml\" ] || \
+               [ -f \"\$dir/compose.yml\" ] || \
+               [ -f \"\$dir/compose.yaml\" ]; then
+                printf '%s\n' \"\${dir%/}\"
+            fi
+        done
+    " 2>/dev/null)" || true
+
+    if [[ -z "$remote_services" ]]; then
+        log_warn "No docker-compose services found in $source_dir on production"
+        return 0
     fi
 
-    local found=0
-    for dir in "$source_dir"/*/; do
-        [[ ! -d "$dir" ]] && continue
-        if [[ -f "$dir/docker-compose.yml" ]] || [[ -f "$dir/docker-compose.yaml" ]] || [[ -f "$dir/compose.yml" ]] || [[ -f "$dir/compose.yaml" ]]; then
-            echo "${dir%/}"
-            ((found++))
-        fi
-    done
-
-    if [[ $found -eq 0 ]]; then
-        log_warn "No docker-compose services found in $source_dir"
-    fi
-
+    echo "$remote_services"
     return 0
 }

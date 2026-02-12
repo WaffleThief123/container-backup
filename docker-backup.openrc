@@ -1,11 +1,11 @@
 #!/sbin/openrc-run
-# docker-backup - OpenRC init script for Docker Compose backup
+# docker-backup - OpenRC init script for Docker Compose backup (pull model)
 
-description="Docker Compose Backup"
+description="Docker Compose Backup (pull from production)"
 
 depend() {
-    need docker
-    after docker
+    need net
+    after sshd
 }
 
 command="/opt/docker-backup/docker-backup"

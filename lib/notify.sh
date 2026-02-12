@@ -67,12 +67,11 @@ send_discord() {
         }'
     )"
 
-    curl -sS -H "Content-Type: application/json" \
+    local curl_err
+    if ! curl_err="$(curl -sS -H "Content-Type: application/json" \
         -d "$payload" \
-        "$WEBHOOK_URL" >/dev/null 2>/tmp/webhook_err
-
-    if [[ $? -ne 0 ]]; then
-        log_warn "Discord webhook failed: $(cat /tmp/webhook_err)"
+        "$WEBHOOK_URL" 2>&1 >/dev/null)"; then
+        log_warn "Discord webhook failed: $curl_err"
     fi
 }
 
@@ -123,12 +122,11 @@ send_slack() {
         }'
     )"
 
-    curl -sS -H "Content-Type: application/json" \
+    local curl_err
+    if ! curl_err="$(curl -sS -H "Content-Type: application/json" \
         -d "$payload" \
-        "$WEBHOOK_URL" >/dev/null 2>/tmp/webhook_err
-
-    if [[ $? -ne 0 ]]; then
-        log_warn "Slack webhook failed: $(cat /tmp/webhook_err)"
+        "$WEBHOOK_URL" 2>&1 >/dev/null)"; then
+        log_warn "Slack webhook failed: $curl_err"
     fi
 }
 
@@ -172,12 +170,11 @@ ${summary}
         }'
     )"
 
-    curl -sS -H "Content-Type: application/json" \
+    local curl_err
+    if ! curl_err="$(curl -sS -H "Content-Type: application/json" \
         -d "$payload" \
-        "$api_url" >/dev/null 2>/tmp/webhook_err
-
-    if [[ $? -ne 0 ]]; then
-        log_warn "Telegram notification failed: $(cat /tmp/webhook_err)"
+        "$api_url" 2>&1 >/dev/null)"; then
+        log_warn "Telegram notification failed: $curl_err"
     fi
 }
 

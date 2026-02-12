@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# database.sh - Database dump logic via docker exec
+# database.sh - Database dump logic via docker exec on production server
 
 # Dump all configured databases for a service.
-# Creates dumps in $service_dir/_dumps/
+# Creates dumps in $service_dir/_dumps/ on production.
 # Usage: dump_databases /opt/docker/myapp
 dump_databases() {
     local service_dir="$1"
@@ -14,14 +14,16 @@ dump_databases() {
     db_defs="$(get_db_definitions)"
     [[ -z "$db_defs" ]] && return 0
 
-    mkdir -p "$dump_dir"
+    prod_ssh "mkdir -p '$dump_dir'"
 
     while IFS='|' read -r container db_type db_names; do
         [[ -z "$container" ]] && continue
 
-        # Check container is running
-        if ! docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
-            log_error "Container $container is not running, cannot dump"
+        # Check container is running on production
+        local running
+        running="$(prod_ssh "docker inspect --format='{{.State.Running}}' '$container' 2>/dev/null")" || true
+        if [[ "$running" != "true" ]]; then
+            log_error "Container $container is not running on production, cannot dump"
             ((errors++))
             continue
         fi
@@ -40,10 +42,11 @@ dump_databases() {
         esac
     done <<< "$db_defs"
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
-# Dump PostgreSQL databases via docker exec
+# Dump PostgreSQL databases via docker exec on production
 # Usage: dump_postgres container_name "db1,db2" /path/to/dumps
 dump_postgres() {
     local container="$1"
@@ -53,8 +56,8 @@ dump_postgres() {
     if [[ "$db_names" == "all" ]]; then
         log_info "Dumping all PostgreSQL databases from $container"
         local db_list
-        db_list="$(docker exec "$container" psql -U postgres -At -c \
-            "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres';" 2>&1)"
+        db_list="$(prod_ssh "docker exec '$container' psql -U postgres -At -c \
+            \"SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres';\"" 2>&1)"
         if [[ $? -ne 0 ]]; then
             log_error "Failed to list databases from $container: $db_list"
             return 1
@@ -71,21 +74,23 @@ dump_postgres() {
         local dump_file="$dump_dir/${container}_${db}.pgfc"
         log_info "Dumping PostgreSQL: $container/$db -> $(basename "$dump_file")"
 
-        if docker exec "$container" pg_dump -U postgres -Fc "$db" > "$dump_file" 2>/tmp/pgdump_err; then
+        local dump_err
+        if dump_err="$(prod_ssh "docker exec '$container' pg_dump -U postgres -Fc '$db' > '$dump_file'" 2>&1)"; then
             local size
-            size="$(du -h "$dump_file" | cut -f1)"
+            size="$(prod_ssh "du -h '$dump_file' | cut -f1")"
             log_info "  Dump complete: $size"
         else
-            log_error "  pg_dump failed for $container/$db: $(cat /tmp/pgdump_err)"
-            rm -f "$dump_file"
+            log_error "  pg_dump failed for $container/$db: $dump_err"
+            prod_ssh "rm -f '$dump_file'"
             ((errors++))
         fi
     done
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
-# Dump MySQL/MariaDB databases via docker exec
+# Dump MySQL/MariaDB databases via docker exec on production
 # Usage: dump_mysql container_name "db1,db2" /path/to/dumps
 dump_mysql() {
     local container="$1"
@@ -95,8 +100,8 @@ dump_mysql() {
     if [[ "$db_names" == "all" ]]; then
         log_info "Dumping all MySQL databases from $container"
         local db_list
-        db_list="$(docker exec "$container" mysql -u root -N -e \
-            "SHOW DATABASES;" 2>&1 | grep -Ev '^(information_schema|performance_schema|mysql|sys)$')"
+        db_list="$(prod_ssh "docker exec '$container' mysql -u root -N -e \
+            'SHOW DATABASES;' | grep -Ev '^(information_schema|performance_schema|mysql|sys)$'" 2>&1)"
         if [[ $? -ne 0 ]]; then
             log_error "Failed to list databases from $container: $db_list"
             return 1
@@ -113,28 +118,28 @@ dump_mysql() {
         local dump_file="$dump_dir/${container}_${db}.sql"
         log_info "Dumping MySQL: $container/$db -> $(basename "$dump_file")"
 
-        if docker exec "$container" mysqldump -u root --single-transaction "$db" > "$dump_file" 2>/tmp/mysqldump_err; then
+        local dump_err
+        if dump_err="$(prod_ssh "docker exec '$container' mysqldump -u root --single-transaction '$db' > '$dump_file'" 2>&1)"; then
             local size
-            size="$(du -h "$dump_file" | cut -f1)"
+            size="$(prod_ssh "du -h '$dump_file' | cut -f1")"
             log_info "  Dump complete: $size"
         else
-            log_error "  mysqldump failed for $container/$db: $(cat /tmp/mysqldump_err)"
-            rm -f "$dump_file"
+            log_error "  mysqldump failed for $container/$db: $dump_err"
+            prod_ssh "rm -f '$dump_file'"
             ((errors++))
         fi
     done
 
-    return $errors
+    [[ $errors -gt 0 ]] && return 1
+    return 0
 }
 
-# Clean up dump directory after archive is created
+# Clean up dump directory on production after archive is created
 # Usage: cleanup_dumps /opt/docker/myapp
 cleanup_dumps() {
     local service_dir="$1"
     local dump_dir="$service_dir/_dumps"
 
-    if [[ -d "$dump_dir" ]]; then
-        rm -rf "$dump_dir"
-        log_info "Cleaned up dumps: $dump_dir"
-    fi
+    prod_ssh "rm -rf '$dump_dir'" 2>/dev/null
+    log_info "Cleaned up dumps: $dump_dir (on production)"
 }

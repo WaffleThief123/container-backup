@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# docker-backup - Main backup orchestrator for Docker Compose services
+# docker-backup - Pull-model backup orchestrator for Docker Compose services
+#
+# Runs on the BACKUP server, pulls from production over SSH.
 #
 # Usage:
 #   docker-backup [OPTIONS]
@@ -9,7 +11,6 @@
 #   --config FILE     Path to global config (default: /opt/docker-backup/docker-backup.conf)
 #   --service NAME    Back up only the named service
 #   --dry-run         Walk through all steps without actually archiving/transferring
-#   --no-transfer     Skip rsync transfer to remote
 #   --no-prune        Skip GFS retention pruning
 #   --no-notify       Skip webhook notification
 #   -v, --verbose     Verbose output
@@ -31,7 +32,6 @@ LOG_TAG="docker-backup"
 CONFIG_FILE="/opt/docker-backup/docker-backup.conf"
 SINGLE_SERVICE=""
 DRY_RUN=false
-NO_TRANSFER=false
 NO_PRUNE=false
 NO_NOTIFY=false
 VERBOSE=false
@@ -83,10 +83,6 @@ parse_args() {
                 ;;
             --dry-run)
                 DRY_RUN=true
-                shift
-                ;;
-            --no-transfer)
-                NO_TRANSFER=true
                 shift
                 ;;
             --no-prune)
@@ -142,14 +138,13 @@ Backup options:
   --config FILE     Path to global config (default: /opt/docker-backup/docker-backup.conf)
   --service NAME    Back up only the named service
   --dry-run         Walk through all steps without archiving/transferring
-  --no-transfer     Skip rsync transfer to remote
   --no-prune        Skip GFS retention pruning
   --no-notify       Skip webhook notification
   -v, --verbose     Verbose output
   -h, --help        Show this help
 
 Restore options:
-  --list [SERVICE]  List available backups on remote (optionally filter by service)
+  --list [SERVICE]  List available backups (optionally filter by service)
   --file FILENAME   Restore a specific backup file
   --target DIR      Extract to DIR (default: /tmp/docker-backup-restore)
 EOF
@@ -167,48 +162,49 @@ backup_service() {
     service_start=$(date +%s)
     local service_error=false
 
-    # Load per-service config
+    # Load per-service config from production
     load_service_config "$service_dir"
 
-    # Pre-backup hook
+    # Detect compose file on production (single SSH call)
+    local compose_file=""
+    compose_file="$(prod_ssh "
+        for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+            [ -f '${service_dir}/'\"\$f\" ] && echo '${service_dir}/'\"\$f\" && exit 0
+        done
+    " 2>/dev/null)" || true
+
+    # Pre-backup hook (runs on production)
     if [[ -n "$PRE_BACKUP_HOOK" ]]; then
-        log_info "Running pre-backup hook"
+        log_info "Running pre-backup hook on production"
         if $DRY_RUN; then
-            log_info "  [DRY RUN] Would run: $PRE_BACKUP_HOOK"
+            log_info "  [DRY RUN] Would run on production: $PRE_BACKUP_HOOK"
         else
-            if ! eval "$PRE_BACKUP_HOOK"; then
+            if ! prod_ssh "$PRE_BACKUP_HOOK"; then
                 log_warn "Pre-backup hook failed (continuing)"
             fi
         fi
     fi
 
-    # Stop containers if stop-start mode
-    local compose_file=""
-    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
-        if [[ -f "$service_dir/$f" ]]; then
-            compose_file="$service_dir/$f"
-            break
-        fi
-    done
-
+    # Stop containers if stop-start mode (on production)
     if [[ "$BACKUP_MODE" == "stop-start" ]]; then
-        log_info "Stopping containers (stop-start mode)"
+        log_info "Stopping containers on production (stop-start mode)"
         if $DRY_RUN; then
-            log_info "  [DRY RUN] Would run: docker compose -f $compose_file stop"
+            log_info "  [DRY RUN] Would run on production: docker compose -f $compose_file stop"
         else
-            if ! docker compose -f "$compose_file" stop 2>/tmp/compose_err; then
-                log_error "Failed to stop containers: $(cat /tmp/compose_err)"
+            local compose_err
+            if ! compose_err="$(prod_ssh "docker compose -f '$compose_file' stop" 2>&1)"; then
+                log_error "Failed to stop containers: $compose_err"
                 service_error=true
             fi
         fi
     fi
 
-    # Database dumps
+    # Database dumps (on production)
     if $DRY_RUN; then
         local db_defs
         db_defs="$(get_db_definitions)"
         if [[ -n "$db_defs" ]]; then
-            log_info "[DRY RUN] Would dump databases:"
+            log_info "[DRY RUN] Would dump databases on production:"
             while IFS='|' read -r container db_type db_names; do
                 log_info "  $container ($db_type): $db_names"
             done <<< "$db_defs"
@@ -220,71 +216,80 @@ backup_service() {
         fi
     fi
 
-    # Create archive
+    # Create archive (on production, written to PRODUCTION_STAGING_DIR)
     local archive_name
     archive_name="$(archive_filename "$service_name" "$DATE_STR")"
-    local archive_path=""
+    local created_archive=""
 
     if $DRY_RUN; then
-        log_info "[DRY RUN] Would create archive: $archive_name"
+        log_info "[DRY RUN] Would create archive on production: $archive_name"
         log_info "  Source: $service_dir"
         if [[ -n "$EXCLUDE" ]]; then
             log_info "  Excludes: $EXCLUDE"
         fi
     else
-        archive_path="$(create_archive "$service_dir" "$BACKUP_LOCAL_STAGING" "$archive_name")"
-        if [[ $? -ne 0 ]] || [[ -z "$archive_path" ]]; then
+        if ! created_archive="$(create_archive "$service_dir" "$archive_name")"; then
             log_error "Archive creation failed for $service_name"
             service_error=true
+            created_archive=""
         fi
     fi
 
-    # Restart containers if stop-start mode
+    # Restart containers if stop-start mode (on production)
     if [[ "$BACKUP_MODE" == "stop-start" ]]; then
-        log_info "Starting containers (stop-start mode)"
+        log_info "Starting containers on production (stop-start mode)"
         if $DRY_RUN; then
-            log_info "  [DRY RUN] Would run: docker compose -f $compose_file start"
+            log_info "  [DRY RUN] Would run on production: docker compose -f $compose_file start"
         else
-            if ! docker compose -f "$compose_file" start 2>/tmp/compose_err; then
-                log_error "Failed to start containers: $(cat /tmp/compose_err)"
+            local compose_err
+            if ! compose_err="$(prod_ssh "docker compose -f '$compose_file' start" 2>&1)"; then
+                log_error "Failed to start containers: $compose_err"
                 service_error=true
             fi
         fi
     fi
 
-    # Post-backup hook
+    # Clean up database dumps on production
+    if ! $DRY_RUN; then
+        cleanup_dumps "$service_dir"
+    fi
+
+    # Post-backup hook (runs on production)
     if [[ -n "$POST_BACKUP_HOOK" ]]; then
-        log_info "Running post-backup hook"
+        log_info "Running post-backup hook on production"
         if $DRY_RUN; then
-            log_info "  [DRY RUN] Would run: $POST_BACKUP_HOOK"
+            log_info "  [DRY RUN] Would run on production: $POST_BACKUP_HOOK"
         else
-            if ! eval "$POST_BACKUP_HOOK"; then
+            if ! prod_ssh "$POST_BACKUP_HOOK"; then
                 log_warn "Post-backup hook failed (continuing)"
             fi
         fi
     fi
 
-    # Encrypt
-    if [[ -n "$archive_path" ]] && [[ -f "$archive_path" ]]; then
-        local encrypted_path="${archive_path}.age"
-        if $DRY_RUN; then
-            log_info "[DRY RUN] Would encrypt: $archive_name -> ${archive_name}.age"
-        else
-            if encrypt_file "$archive_path" "$encrypted_path" >/dev/null; then
-                # Remove unencrypted archive
-                rm -f "$archive_path"
-            else
-                log_error "Encryption failed for $service_name"
-                service_error=true
-            fi
+    # Pull archive from production to local staging
+    if [[ -n "$created_archive" ]] && ! $DRY_RUN; then
+        if ! pull_archive "$created_archive" "$BACKUP_STAGING_DIR"; then
+            log_error "Failed to pull archive for $service_name"
+            service_error=true
         fi
-    elif ! $DRY_RUN; then
-        log_info "[DRY RUN] Would encrypt: $archive_name -> ${archive_name}.age"
+    elif $DRY_RUN; then
+        log_info "[DRY RUN] Would pull archive: $archive_name from production"
     fi
 
-    # Clean up database dumps
-    if ! $DRY_RUN; then
-        cleanup_dumps "$service_dir"
+    # Encrypt locally and move to BACKUP_DIR
+    local encrypted_name="${archive_name}.age"
+    if [[ -n "$created_archive" ]] && [[ -f "$BACKUP_STAGING_DIR/$created_archive" ]]; then
+        if encrypt_file "$BACKUP_STAGING_DIR/$created_archive" "$BACKUP_DIR/$encrypted_name" >/dev/null; then
+            # Clean up local staging copy
+            rm -f "$BACKUP_STAGING_DIR/$created_archive"
+            # Clean up remote staging copy
+            prod_ssh "rm -f '${PRODUCTION_STAGING_DIR}/${created_archive}'" 2>/dev/null
+        else
+            log_error "Encryption failed for $service_name"
+            service_error=true
+        fi
+    elif $DRY_RUN; then
+        log_info "[DRY RUN] Would encrypt: $archive_name -> $encrypted_name"
     fi
 
     # Track results
@@ -296,15 +301,15 @@ backup_service() {
         BACKUP_RESULTS+=("$service_name: [DRY RUN] (${service_duration}s)")
     elif $service_error; then
         local size="N/A"
-        if [[ -f "${BACKUP_LOCAL_STAGING}/${archive_name}.age" ]]; then
-            size="$(du -h "${BACKUP_LOCAL_STAGING}/${archive_name}.age" | cut -f1)"
+        if [[ -f "${BACKUP_DIR}/${encrypted_name}" ]]; then
+            size="$(du -h "${BACKUP_DIR}/${encrypted_name}" | cut -f1)"
         fi
         BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s) [ERRORS]")
         BACKUP_ERRORS+=("$service_name: check logs for details")
     else
         local size="unknown"
-        if [[ -f "${BACKUP_LOCAL_STAGING}/${archive_name}.age" ]]; then
-            size="$(du -h "${BACKUP_LOCAL_STAGING}/${archive_name}.age" | cut -f1)"
+        if [[ -f "${BACKUP_DIR}/${encrypted_name}" ]]; then
+            size="$(du -h "${BACKUP_DIR}/${encrypted_name}" | cut -f1)"
         fi
         BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s)")
     fi
@@ -320,6 +325,7 @@ run_backup() {
 
     log_info "========================================="
     log_info "Docker Backup starting: $DATE_STR"
+    log_info "Production: ${PRODUCTION_USER}@${PRODUCTION_HOST}"
     log_info "========================================="
 
     if $DRY_RUN; then
@@ -327,17 +333,17 @@ run_backup() {
         echo ""
     fi
 
-    # Discover services
+    # Discover services on production
     local services
     if [[ -n "$SINGLE_SERVICE" ]]; then
-        local service_path="$BACKUP_SOURCE_DIR/$SINGLE_SERVICE"
-        if [[ ! -d "$service_path" ]]; then
-            log_error "Service directory not found: $service_path"
+        local service_path="$PRODUCTION_SOURCE_DIR/$SINGLE_SERVICE"
+        if ! prod_ssh "test -d '$service_path'" 2>/dev/null; then
+            log_error "Service directory not found on production: $service_path"
             exit 1
         fi
         services="$service_path"
     else
-        services="$(discover_services "$BACKUP_SOURCE_DIR")"
+        services="$(discover_services "$PRODUCTION_SOURCE_DIR")"
     fi
 
     if [[ -z "$services" ]]; then
@@ -350,8 +356,11 @@ run_backup() {
     log_info "Found $service_count service(s) to back up"
     echo ""
 
-    # Create staging directory
-    mkdir -p "$BACKUP_LOCAL_STAGING"
+    # Create local directories and remote staging
+    mkdir -p "$BACKUP_STAGING_DIR" "$BACKUP_DIR"
+    if ! $DRY_RUN; then
+        prod_ssh "mkdir -p '$PRODUCTION_STAGING_DIR'"
+    fi
 
     # Back up each service
     while IFS= read -r service_dir; do
@@ -359,25 +368,12 @@ run_backup() {
         backup_service "$service_dir"
     done <<< "$services"
 
-    # Calculate total size of staged archives
-    if [[ -d "$BACKUP_LOCAL_STAGING" ]]; then
-        TOTAL_BACKUP_SIZE="$(du -sh "$BACKUP_LOCAL_STAGING" 2>/dev/null | cut -f1)"
+    # Calculate total size of backup dir
+    if [[ -d "$BACKUP_DIR" ]]; then
+        TOTAL_BACKUP_SIZE="$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)"
     fi
 
-    # Transfer
-    if ! $NO_TRANSFER && ! $DRY_RUN; then
-        log_info "========================================="
-        log_info "Transferring archives to remote"
-        log_info "========================================="
-        if ! transfer_archives "$BACKUP_LOCAL_STAGING"; then
-            BACKUP_ERRORS+=("Transfer: rsync to $REMOTE_HOST failed")
-        fi
-        echo ""
-    elif $DRY_RUN; then
-        log_info "[DRY RUN] Would transfer archives to $REMOTE_HOST:$REMOTE_PATH"
-    fi
-
-    # GFS Pruning
+    # GFS Pruning (local)
     if ! $NO_PRUNE && ! $DRY_RUN; then
         log_info "========================================="
         log_info "Applying retention policy"
@@ -390,10 +386,11 @@ run_backup() {
         log_info "[DRY RUN] Would apply GFS retention (daily=$RETAIN_DAILY, weekly=$RETAIN_WEEKLY, monthly=$RETAIN_MONTHLY)"
     fi
 
-    # Cleanup staging
+    # Cleanup staging on both sides
     if ! $DRY_RUN; then
-        log_info "Cleaning up staging: $BACKUP_LOCAL_STAGING"
-        rm -rf "$BACKUP_LOCAL_STAGING"
+        log_info "Cleaning up staging directories"
+        rm -rf "$BACKUP_STAGING_DIR"
+        prod_ssh "rm -rf '$PRODUCTION_STAGING_DIR'" 2>/dev/null
     fi
 
     # Summary

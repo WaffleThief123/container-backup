@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # restore.sh - Restore helpers for docker-backup
 
-# List available backups on remote, optionally filtered by service.
+# List available backups in local BACKUP_DIR, optionally filtered by service.
 # Usage: restore_list [service_name]
 restore_list() {
     local service_filter="${1:-}"
 
-    echo "Available backups on ${REMOTE_HOST}:${REMOTE_PATH}/"
+    echo "Available backups in ${BACKUP_DIR}/"
     echo "---"
 
     local files
-    files="$(list_remote_backups "$service_filter")"
+    files="$(list_local_backups "$service_filter")"
 
     if [[ -z "$files" ]]; then
         echo "No backups found."
@@ -21,50 +21,48 @@ restore_list() {
     return 0
 }
 
-# Restore a backup archive.
+# Restore a backup archive from local BACKUP_DIR.
 # Usage: restore_backup filename [target_dir]
 restore_backup() {
     local filename="$1"
     local target_dir="${2:-/tmp/docker-backup-restore}"
+    local source_file="$BACKUP_DIR/$filename"
 
     local work_dir="$target_dir/.restore-work"
     mkdir -p "$work_dir"
 
     echo "Restoring: $filename"
+    echo "Source: $source_file"
     echo "Target: $target_dir"
     echo ""
 
-    # Step 1: Download from remote
-    echo "Step 1/4: Downloading from remote..."
-    local downloaded
-    downloaded="$(download_backup "$filename" "$work_dir")"
-    if [[ $? -ne 0 ]] || [[ -z "$downloaded" ]]; then
-        echo "ERROR: Download failed"
+    if [[ ! -f "$source_file" ]]; then
+        echo "ERROR: Backup file not found: $source_file"
         rm -rf "$work_dir"
         return 1
     fi
 
-    # Step 2: Decrypt
-    echo "Step 2/4: Decrypting..."
-    local decrypted="${downloaded%.age}"
-    if ! decrypt_file "$downloaded" "$decrypted" >/dev/null; then
+    # Step 1: Decrypt
+    echo "Step 1/3: Decrypting..."
+    local decrypted="$work_dir/$(basename "${filename%.age}")"
+    if ! decrypt_file "$source_file" "$decrypted" >/dev/null; then
         echo "ERROR: Decryption failed"
         rm -rf "$work_dir"
         return 1
     fi
-    rm -f "$downloaded"
 
-    # Step 3: Decompress + extract
-    echo "Step 3/4: Extracting..."
-    if ! tar -I 'zstd -d' -xf "$decrypted" -C "$target_dir" 2>/tmp/tar_err; then
-        echo "ERROR: Extraction failed: $(cat /tmp/tar_err)"
+    # Step 2: Decompress + extract
+    echo "Step 2/3: Extracting..."
+    local tar_err
+    if ! tar_err="$(tar -I 'zstd -d' -xf "$decrypted" -C "$target_dir" 2>&1)"; then
+        echo "ERROR: Extraction failed: $tar_err"
         rm -rf "$work_dir"
         return 1
     fi
     rm -f "$decrypted"
 
-    # Step 4: Check for database dumps
-    echo "Step 4/4: Checking for database dumps..."
+    # Step 3: Check for database dumps
+    echo "Step 3/3: Checking for database dumps..."
     local service_name
     service_name="$(echo "$filename" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\.tar\.zst\.age$//')"
     local dump_dir="$target_dir/$service_name/_dumps"
