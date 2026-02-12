@@ -97,10 +97,18 @@ dump_mysql() {
     local db_names="$2"
     local dump_dir="$3"
 
+    # Detect available commands (mariadb-dump/mysqldump, mariadb/mysql)
+    local dump_cmd="mysqldump"
+    local client_cmd="mysql"
+    if prod_ssh "docker exec '$container' command -v mariadb-dump" &>/dev/null; then
+        dump_cmd="mariadb-dump"
+        client_cmd="mariadb"
+    fi
+
     if [[ "$db_names" == "all" ]]; then
         log_info "Dumping all MySQL databases from $container"
         local db_list
-        db_list="$(prod_ssh "docker exec '$container' mysql -u root -N -e \
+        db_list="$(prod_ssh "docker exec '$container' $client_cmd -u root -N -e \
             'SHOW DATABASES;' | grep -Ev '^(information_schema|performance_schema|mysql|sys)$'" 2>&1)"
         if [[ $? -ne 0 ]]; then
             log_error "Failed to list databases from $container: $db_list"
@@ -116,10 +124,10 @@ dump_mysql() {
         [[ -z "$db" ]] && continue
 
         local dump_file="$dump_dir/${container}_${db}.sql"
-        log_info "Dumping MySQL: $container/$db -> $(basename "$dump_file")"
+        log_info "Dumping MySQL: $container/$db -> $(basename "$dump_file") (via $dump_cmd)"
 
         local dump_err
-        if dump_err="$(prod_ssh "docker exec '$container' mysqldump -u root --single-transaction '$db' > '$dump_file'" 2>&1)"; then
+        if dump_err="$(prod_ssh "docker exec '$container' $dump_cmd -u root --single-transaction '$db' > '$dump_file'" 2>&1)"; then
             local size
             size="$(prod_ssh "du -h '$dump_file' | cut -f1")"
             log_info "  Dump complete: $size"
