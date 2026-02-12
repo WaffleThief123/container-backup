@@ -16,7 +16,7 @@ create_archive() {
         local pattern
         for pattern in ${EXCLUDE//,/ }; do
             pattern="$(echo "$pattern" | xargs)"
-            [[ -n "$pattern" ]] && exclude_str+=" --exclude=$pattern"
+            [[ -n "$pattern" ]] && exclude_str+=" --exclude='$pattern'"
         done
     fi
 
