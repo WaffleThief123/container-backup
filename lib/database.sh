@@ -65,9 +65,9 @@ dump_postgres() {
         db_names="$(echo "$db_list" | paste -sd,)"
     fi
 
-    local IFS=','
     local errors=0
-    for db in $db_names; do
+    local db
+    for db in ${db_names//,/ }; do
         db="$(echo "$db" | xargs)"
         [[ -z "$db" ]] && continue
 
@@ -109,9 +109,9 @@ dump_mysql() {
         db_names="$(echo "$db_list" | paste -sd,)"
     fi
 
-    local IFS=','
     local errors=0
-    for db in $db_names; do
+    local db
+    for db in ${db_names//,/ }; do
         db="$(echo "$db" | xargs)"
         [[ -z "$db" ]] && continue
 
