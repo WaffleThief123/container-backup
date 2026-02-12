@@ -108,8 +108,7 @@ dump_mysql() {
     if [[ "$db_names" == "all" ]]; then
         log_info "Dumping all MySQL databases from $container"
         local db_list
-        db_list="$(prod_ssh "docker exec '$container' $client_cmd -u root -N -e \
-            'SHOW DATABASES;' | grep -Ev '^(information_schema|performance_schema|mysql|sys)$'" 2>&1)"
+        db_list="$(prod_ssh "docker exec '$container' sh -c 'MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" $client_cmd -u root -N -e \"SHOW DATABASES;\"' | grep -Ev '^(information_schema|performance_schema|mysql|sys)\$'" 2>&1)"
         if [[ $? -ne 0 ]]; then
             log_error "Failed to list databases from $container: $db_list"
             return 1
@@ -127,7 +126,7 @@ dump_mysql() {
         log_info "Dumping MySQL: $container/$db -> $(basename "$dump_file") (via $dump_cmd)"
 
         local dump_err
-        if dump_err="$(prod_ssh "docker exec '$container' $dump_cmd -u root --single-transaction '$db' > '$dump_file'" 2>&1)"; then
+        if dump_err="$(prod_ssh "docker exec '$container' sh -c 'MYSQL_PWD=\"\$MYSQL_ROOT_PASSWORD\" $dump_cmd -u root --single-transaction $db' > '$dump_file'" 2>&1)"; then
             local size
             size="$(prod_ssh "du -h '$dump_file' | cut -f1")"
             log_info "  Dump complete: $size"
