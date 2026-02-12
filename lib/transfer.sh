@@ -4,7 +4,7 @@
 # Build the SSH command string used by rsync and remote operations.
 # Usage: prod_ssh_cmd
 prod_ssh_cmd() {
-    echo "ssh -T -i ${SSH_KEY} -p ${PRODUCTION_PORT} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+    echo "ssh -T -n -i ${SSH_KEY} -p ${PRODUCTION_PORT} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 }
 
 # Execute a command on the production server via SSH.
