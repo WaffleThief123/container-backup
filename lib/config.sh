@@ -126,31 +126,22 @@ get_db_definitions() {
 
 # Discover docker-compose services on the production server via SSH.
 # Prints one service directory path per line.
-# Uses a single SSH call to check all directories at once.
+# Uses find to avoid shell-compatibility issues (remote shell may be zsh).
 discover_services() {
     local source_dir="$1"
 
-    local remote_services ssh_err
-    if ! remote_services="$(prod_ssh "
-        for dir in '${source_dir}'/*/; do
-            [ -d \"\$dir\" ] || continue
-            if [ -f \"\$dir/docker-compose.yml\" ] || \
-               [ -f \"\$dir/docker-compose.yaml\" ] || \
-               [ -f \"\$dir/compose.yml\" ] || \
-               [ -f \"\$dir/compose.yaml\" ]; then
-                printf '%s\n' \"\${dir%/}\"
-            fi
-        done
-    " 2>&1)"; then
-        log_error "Failed to connect to production server: $remote_services"
+    local remote_files
+    if ! remote_files="$(prod_ssh "find '${source_dir}' -mindepth 2 -maxdepth 2 \( -name docker-compose.yml -o -name docker-compose.yaml -o -name compose.yml -o -name compose.yaml \)" 2>&1)"; then
+        log_error "Failed to connect to production server: $remote_files"
         return 1
     fi
 
-    if [[ -z "$remote_services" ]]; then
+    if [[ -z "$remote_files" ]]; then
         log_warn "No docker-compose services found in $source_dir on production"
         return 0
     fi
 
-    echo "$remote_services"
+    # Strip compose filenames to get service directories, deduplicate
+    echo "$remote_files" | sed 's|/[^/]*$||' | sort -u
     return 0
 }

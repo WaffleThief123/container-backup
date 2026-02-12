@@ -165,13 +165,9 @@ backup_service() {
     # Load per-service config from production
     load_service_config "$service_dir"
 
-    # Detect compose file on production (single SSH call)
+    # Detect compose file on production
     local compose_file=""
-    compose_file="$(prod_ssh "
-        for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
-            [ -f '${service_dir}/'\"\$f\" ] && echo '${service_dir}/'\"\$f\" && exit 0
-        done
-    " 2>/dev/null)" || true
+    compose_file="$(prod_ssh "find '${service_dir}' -maxdepth 1 \( -name docker-compose.yml -o -name docker-compose.yaml -o -name compose.yml -o -name compose.yaml \) | head -1" 2>/dev/null)" || true
 
     # Pre-backup hook (runs on production)
     if [[ -n "$PRE_BACKUP_HOOK" ]]; then
