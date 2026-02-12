@@ -42,7 +42,7 @@ create_archive() {
         local size
         size="$(prod_ssh "du -h '$archive_path' | cut -f1")"
         local raw_size
-        raw_size="$(prod_ssh "du -sh '$service_dir' | cut -f1")"
+        raw_size="$(prod_ssh "du -sh '$service_dir' 2>/dev/null | cut -f1")"
 
         log_info "  Archive created: $size (from $raw_size) in ${duration}s"
         echo "$archive_name"
