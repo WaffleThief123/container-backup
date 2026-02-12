@@ -107,11 +107,11 @@ get_db_definitions() {
         local type_var="DB_${i}_TYPE"
         local names_var="DB_${i}_NAMES"
 
-        local container="${!container_var}"
+        local container="${!container_var:-}"
         [[ -z "$container" ]] && break
 
-        local db_type="${!type_var}"
-        local db_names="${!names_var}"
+        local db_type="${!type_var:-}"
+        local db_names="${!names_var:-}"
 
         if [[ -z "$db_type" ]]; then
             log_warn "DB_${i}_TYPE not set for container $container, skipping"
@@ -130,8 +130,8 @@ get_db_definitions() {
 discover_services() {
     local source_dir="$1"
 
-    local remote_services
-    remote_services="$(prod_ssh "
+    local remote_services ssh_err
+    if ! remote_services="$(prod_ssh "
         for dir in '${source_dir}'/*/; do
             [ -d \"\$dir\" ] || continue
             if [ -f \"\$dir/docker-compose.yml\" ] || \
@@ -141,7 +141,10 @@ discover_services() {
                 printf '%s\n' \"\${dir%/}\"
             fi
         done
-    " 2>/dev/null)" || true
+    " 2>&1)"; then
+        log_error "Failed to connect to production server: $remote_services"
+        return 1
+    fi
 
     if [[ -z "$remote_services" ]]; then
         log_warn "No docker-compose services found in $source_dir on production"

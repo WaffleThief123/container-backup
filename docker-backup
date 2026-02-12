@@ -337,8 +337,13 @@ run_backup() {
     local services
     if [[ -n "$SINGLE_SERVICE" ]]; then
         local service_path="$PRODUCTION_SOURCE_DIR/$SINGLE_SERVICE"
-        if ! prod_ssh "test -d '$service_path'" 2>/dev/null; then
-            log_error "Service directory not found on production: $service_path"
+        local test_err
+        if ! test_err="$(prod_ssh "test -d '$service_path'" 2>&1)"; then
+            if [[ "$test_err" == *"Permission denied"* ]] || [[ "$test_err" == *"Connection"* ]] || [[ "$test_err" == *"resolve"* ]]; then
+                log_error "Failed to connect to production server: $test_err"
+            else
+                log_error "Service directory not found on production: $service_path"
+            fi
             exit 1
         fi
         services="$service_path"
