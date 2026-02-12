@@ -4,6 +4,8 @@ set -euo pipefail
 
 INSTALL_DIR="/opt/docker-backup"
 SYSTEMD_DIR="/etc/systemd/system"
+OPENRC_DIR="/etc/init.d"
+CRON_FILE="/etc/crontabs/root"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RED='\033[0;31m'
@@ -17,6 +19,35 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[-]${NC} $*"; }
 bold()  { echo -e "${BOLD}$*${NC}"; }
 
+# --- Detect distro ---
+detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        case "$ID" in
+            alpine)  echo "alpine" ;;
+            arch|endeavouros|manjaro) echo "arch" ;;
+            debian|ubuntu|raspbian|linuxmint|pop) echo "debian" ;;
+            fedora|rhel|centos|rocky|alma) echo "fedora" ;;
+            *) echo "unknown" ;;
+        esac
+    else
+        echo "unknown"
+    fi
+}
+
+detect_init() {
+    if command -v systemctl &>/dev/null && systemctl --version &>/dev/null 2>&1; then
+        echo "systemd"
+    elif command -v rc-service &>/dev/null; then
+        echo "openrc"
+    else
+        echo "unknown"
+    fi
+}
+
+DISTRO="$(detect_distro)"
+INIT_SYSTEM="$(detect_init)"
+
 # --- Check root ---
 if [[ $EUID -ne 0 ]]; then
     error "This script must be run as root"
@@ -28,8 +59,10 @@ echo ""
 
 # --- Check dependencies ---
 info "Checking dependencies..."
+info "Detected distro: $DISTRO, init: $INIT_SYSTEM"
+
 missing=()
-for cmd in age zstd rsync docker jq curl ssh tar; do
+for cmd in bash age zstd rsync docker jq curl ssh tar; do
     if ! command -v "$cmd" &>/dev/null; then
         missing+=("$cmd")
     fi
@@ -38,7 +71,18 @@ done
 if [[ ${#missing[@]} -gt 0 ]]; then
     error "Missing dependencies: ${missing[*]}"
     echo "  Install them with your package manager, e.g.:"
-    echo "    pacman -S ${missing[*]}"
+    case "$DISTRO" in
+        alpine)
+            echo "    apk add bash age zstd rsync docker jq curl openssh-client tar" ;;
+        arch)
+            echo "    pacman -S ${missing[*]}" ;;
+        debian)
+            echo "    apt install ${missing[*]}" ;;
+        fedora)
+            echo "    dnf install ${missing[*]}" ;;
+        *)
+            echo "    <your-package-manager> install ${missing[*]}" ;;
+    esac
     exit 1
 fi
 info "All dependencies found"
@@ -176,17 +220,41 @@ done
 
 info "Scripts installed"
 
-# --- Install systemd units ---
-info "Installing systemd units..."
-cp "$SCRIPT_DIR/docker-backup.service" "$SYSTEMD_DIR/"
-cp "$SCRIPT_DIR/docker-backup.timer" "$SYSTEMD_DIR/"
+# --- Install scheduling / init ---
+if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+    info "Installing systemd units..."
+    cp "$SCRIPT_DIR/docker-backup.service" "$SYSTEMD_DIR/"
+    cp "$SCRIPT_DIR/docker-backup.timer" "$SYSTEMD_DIR/"
 
-systemctl daemon-reload
-systemctl enable docker-backup.timer
-systemctl start docker-backup.timer
+    systemctl daemon-reload
+    systemctl enable docker-backup.timer
+    systemctl start docker-backup.timer
 
-info "Timer enabled and started"
-echo "  Next trigger: $(systemctl show docker-backup.timer --property=NextElapseUSecRealtime --value 2>/dev/null || echo 'check with systemctl list-timers')"
+    info "Timer enabled and started"
+    echo "  Next trigger: $(systemctl show docker-backup.timer --property=NextElapseUSecRealtime --value 2>/dev/null || echo 'check with systemctl list-timers')"
+elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+    info "Installing OpenRC service..."
+    cp "$SCRIPT_DIR/docker-backup.openrc" "$OPENRC_DIR/docker-backup"
+    chmod 755 "$OPENRC_DIR/docker-backup"
+
+    info "Installing cron job (daily at 03:00)..."
+    # Add cron entry if not already present
+    cron_entry="0 3 * * * /opt/docker-backup/docker-backup >> /var/log/docker-backup.log 2>&1"
+    if [[ -f "$CRON_FILE" ]] && grep -qF '/opt/docker-backup/docker-backup' "$CRON_FILE"; then
+        info "Cron entry already exists, skipping"
+    else
+        echo "$cron_entry" >> "$CRON_FILE"
+        info "Cron entry added to $CRON_FILE"
+    fi
+
+    # Ensure crond is enabled and running
+    rc-update add crond default 2>/dev/null || true
+    rc-service crond start 2>/dev/null || true
+    info "Cron job installed"
+else
+    warn "Unknown init system — skipping service/timer installation"
+    warn "You'll need to manually schedule: $INSTALL_DIR/docker-backup"
+fi
 
 # --- Done ---
 echo ""
@@ -194,9 +262,15 @@ bold "=== Installation Complete ==="
 echo ""
 info "Backup script:  $INSTALL_DIR/docker-backup"
 info "Config file:    $CONFIG_FILE"
-info "Timer status:   systemctl status docker-backup.timer"
-info "Manual run:     systemctl start docker-backup.service"
-info "View logs:      journalctl -u docker-backup.service"
+if [[ "$INIT_SYSTEM" == "systemd" ]]; then
+    info "Timer status:   systemctl status docker-backup.timer"
+    info "Manual run:     systemctl start docker-backup.service"
+    info "View logs:      journalctl -u docker-backup.service"
+elif [[ "$INIT_SYSTEM" == "openrc" ]]; then
+    info "Cron schedule:  daily at 03:00 (see $CRON_FILE)"
+    info "Manual run:     rc-service docker-backup start"
+    info "View logs:      /var/log/docker-backup.log"
+fi
 echo ""
 
 # --- Offer test run ---

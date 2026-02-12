@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 # retention.sh - GFS (Grandfather-Father-Son) retention pruning
 
+# Compute ISO day of week (1=Mon..7=Sun) for a YYYY-MM-DD date string.
+# Uses Tomohiko Sakamoto's algorithm (pure arithmetic, no external commands).
+# Usage: day_of_week "2026-02-12"  => 4 (Thursday)
+day_of_week() {
+    local y m d
+    y="${1%%-*}"
+    m="$(echo "$1" | cut -d- -f2)"
+    d="${1##*-}"
+    # Strip leading zeros for arithmetic
+    y=$((10#$y)); m=$((10#$m)); d=$((10#$d))
+
+    local -a t=(0 3 2 5 0 3 5 1 4 6 2 4)
+    if (( m < 3 )); then
+        ((y--))
+    fi
+    local dow=$(( (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7 ))
+    # Sakamoto returns 0=Sun,1=Mon..6=Sat; convert to ISO 1=Mon..7=Sun
+    if (( dow == 0 )); then
+        echo 7
+    else
+        echo "$dow"
+    fi
+}
+
 # Apply GFS retention policy on the remote server.
 # Naming convention: servicename-YYYY-MM-DD.tar.zst.age
 # Usage: apply_retention
@@ -75,7 +99,7 @@ prune_service_backups() {
     while IFS= read -r d; do
         [[ -z "$d" ]] && continue
         local dow
-        dow="$(date -d "$d" +%u 2>/dev/null)" # 7 = Sunday
+        dow="$(day_of_week "$d")" # 7 = Sunday
         if [[ "$dow" == "7" ]] && [[ $weekly_count -lt $RETAIN_WEEKLY ]]; then
             keep_dates["$d"]="${keep_dates[$d]:+${keep_dates[$d]}+}weekly"
             ((weekly_count++))
@@ -88,9 +112,9 @@ prune_service_backups() {
     while IFS= read -r d; do
         [[ -z "$d" ]] && continue
         local day_of_month
-        day_of_month="$(date -d "$d" +%d 2>/dev/null)"
+        day_of_month="$(echo "$d" | cut -d- -f3)"
         local month_key
-        month_key="$(date -d "$d" +%Y-%m 2>/dev/null)"
+        month_key="$(echo "$d" | cut -d- -f1-2)"
 
         if [[ "$day_of_month" == "01" ]] && [[ ! "$seen_months" == *"$month_key"* ]] && [[ $monthly_count -lt $RETAIN_MONTHLY ]]; then
             keep_dates["$d"]="${keep_dates[$d]:+${keep_dates[$d]}+}monthly"

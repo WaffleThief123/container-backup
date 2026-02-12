@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# docker-backup - OpenRC init script for Docker Compose backup
+
+description="Docker Compose Backup"
+
+depend() {
+    need docker
+    after docker
+}
+
+command="/opt/docker-backup/docker-backup"
+command_args=""
+
+# Oneshot: don't try to background or track a PID
+command_background=false
+start_stop_daemon_args="--wait 3600"
+
+start() {
+    ebegin "Running Docker Compose backup"
+    ${command} ${command_args}
+    eend $?
+}
+
+stop() {
+    # Nothing to stop for a oneshot service
+    return 0
+}
