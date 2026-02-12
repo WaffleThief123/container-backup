@@ -13,8 +13,8 @@ create_archive() {
     # Build exclude arguments as a flat string for SSH
     local exclude_str=""
     if [[ -n "$EXCLUDE" ]]; then
-        local IFS=','
-        for pattern in $EXCLUDE; do
+        local pattern
+        for pattern in ${EXCLUDE//,/ }; do
             pattern="$(echo "$pattern" | xargs)"
             [[ -n "$pattern" ]] && exclude_str+=" --exclude=$pattern"
         done
