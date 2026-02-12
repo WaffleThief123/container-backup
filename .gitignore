@@ -1,0 +1,19 @@
+# IDE and tool configs
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Age keys
+*.key
+*.age-key
+
+# SSH keys
+id_*
+*.pem
+
+# Generated configs with real credentials
+# (the template docker-backup.conf is fine to track)
+docker-backup.conf.local
