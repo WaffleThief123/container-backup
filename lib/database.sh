@@ -56,8 +56,7 @@ dump_postgres() {
     if [[ "$db_names" == "all" ]]; then
         log_info "Dumping all PostgreSQL databases from $container"
         local db_list
-        db_list="$(prod_ssh "docker exec '$container' psql -U postgres -At -c \
-            \"SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres';\"" 2>&1)"
+        db_list="$(prod_ssh "docker exec '$container' sh -c 'psql -U \"\${POSTGRES_USER:-postgres}\" -At -c \"SELECT datname FROM pg_database WHERE datistemplate = false AND datname != \\\"postgres\\\";\"'" 2>&1)"
         if [[ $? -ne 0 ]]; then
             log_error "Failed to list databases from $container: $db_list"
             return 1
@@ -75,7 +74,7 @@ dump_postgres() {
         log_info "Dumping PostgreSQL: $container/$db -> $(basename "$dump_file")"
 
         local dump_err
-        if dump_err="$(prod_ssh "docker exec '$container' pg_dump -U postgres -Fc '$db' > '$dump_file'" 2>&1)"; then
+        if dump_err="$(prod_ssh "docker exec '$container' sh -c 'PGPASSWORD=\"\$POSTGRES_PASSWORD\" pg_dump -U \"\${POSTGRES_USER:-postgres}\" -Fc $db' > '$dump_file'" 2>&1)"; then
             local size
             size="$(prod_ssh "du -h '$dump_file' | cut -f1")"
             log_info "  Dump complete: $size"
