@@ -100,7 +100,7 @@ dump_mysql() {
     # Detect available commands (mariadb-dump/mysqldump, mariadb/mysql)
     local dump_cmd="mysqldump"
     local client_cmd="mysql"
-    if prod_ssh "docker exec '$container' command -v mariadb-dump" &>/dev/null; then
+    if prod_ssh "docker exec '$container' sh -c 'command -v mariadb-dump'" &>/dev/null; then
         dump_cmd="mariadb-dump"
         client_cmd="mariadb"
     fi
