@@ -1,5 +1,6 @@
 # IDE and tool configs
 .claude/
+CLAUDE.md
 .vscode/
 .idea/
 *.swp
