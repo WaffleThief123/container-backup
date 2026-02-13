@@ -53,6 +53,22 @@ log_info()  { echo "[$(date +%H:%M:%S)] [INFO]  $*" | tee -a /dev/stderr | logge
 log_warn()  { echo "[$(date +%H:%M:%S)] [WARN]  $*" | tee -a /dev/stderr | logger -t "$LOG_TAG" -p user.warning 2>/dev/null || true; }
 log_error() { echo "[$(date +%H:%M:%S)] [ERROR] $*" | tee -a /dev/stderr | logger -t "$LOG_TAG" -p user.err 2>/dev/null || true; }
 
+# Format byte count as human-readable size (e.g., 1.2G, 340M, 56K).
+# Uses stat -c%s which is reliable across GNU coreutils and BusyBox,
+# unlike du -h which can silently fall back to raw block counts.
+human_size() {
+    local bytes="${1:-0}"
+    if (( bytes >= 1073741824 )); then
+        awk "BEGIN {printf \"%.1fG\", $bytes / 1073741824}"
+    elif (( bytes >= 1048576 )); then
+        awk "BEGIN {printf \"%.1fM\", $bytes / 1048576}"
+    elif (( bytes >= 1024 )); then
+        awk "BEGIN {printf \"%.1fK\", $bytes / 1024}"
+    else
+        echo "${bytes}B"
+    fi
+}
+
 # --- Source library files ---
 for lib in config database archive encrypt transfer retention notify restore; do
     lib_file="$SCRIPT_DIR/lib/${lib}.sh"
@@ -298,14 +314,14 @@ backup_service() {
     elif $service_error; then
         local size="N/A"
         if [[ -f "${BACKUP_DIR}/${encrypted_name}" ]]; then
-            size="$(du -h "${BACKUP_DIR}/${encrypted_name}" | cut -f1)"
+            size="$(human_size "$(stat -c%s "${BACKUP_DIR}/${encrypted_name}" 2>/dev/null || echo 0)")"
         fi
         BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s) [ERRORS]")
         BACKUP_ERRORS+=("$service_name: check logs for details")
     else
         local size="unknown"
         if [[ -f "${BACKUP_DIR}/${encrypted_name}" ]]; then
-            size="$(du -h "${BACKUP_DIR}/${encrypted_name}" | cut -f1)"
+            size="$(human_size "$(stat -c%s "${BACKUP_DIR}/${encrypted_name}" 2>/dev/null || echo 0)")"
         fi
         BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s)")
     fi

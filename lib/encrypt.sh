@@ -22,7 +22,7 @@ encrypt_file() {
 
     if age -r "$AGE_RECIPIENT" -o "$output_file" "$input_file" 2>/tmp/age_err; then
         local size
-        size="$(du -h "$output_file" | cut -f1)"
+        size="$(human_size "$(stat -c%s "$output_file" 2>/dev/null || echo 0)")"
         log_info "  Encrypted: $size"
         echo "$output_file"
         return 0
@@ -57,7 +57,7 @@ decrypt_file() {
     log_info "Decrypting: $(basename "$input_file")"
 
     if age -d -i "$AGE_KEY_FILE" -o "$output_file" "$input_file" 2>/tmp/age_err; then
-        log_info "  Decrypted: $(du -h "$output_file" | cut -f1)"
+        log_info "  Decrypted: $(human_size "$(stat -c%s "$output_file" 2>/dev/null || echo 0)")"
         echo "$output_file"
         return 0
     else
