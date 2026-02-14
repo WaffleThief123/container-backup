@@ -43,6 +43,7 @@ RESTORE_TARGET=""
 declare -a BACKUP_RESULTS=()
 declare -a BACKUP_ERRORS=()
 TOTAL_BACKUP_SIZE="0"
+SESSION_BACKUP_BYTES=0
 TOTAL_DURATION=0
 
 # --- Logging ---
@@ -306,14 +307,20 @@ backup_service() {
     elif $service_error; then
         local size="N/A"
         if [[ -f "${BACKUP_DIR}/${encrypted_name}" ]]; then
-            size="$(human_size "$(stat -c%s "${BACKUP_DIR}/${encrypted_name}" 2>/dev/null || echo 0)")"
+            local raw_bytes
+            raw_bytes="$(stat -c%s "${BACKUP_DIR}/${encrypted_name}" 2>/dev/null || echo 0)"
+            size="$(human_size "$raw_bytes")"
+            SESSION_BACKUP_BYTES=$((SESSION_BACKUP_BYTES + raw_bytes))
         fi
         BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s) [ERRORS]")
         BACKUP_ERRORS+=("$service_name: check logs for details")
     else
         local size="unknown"
         if [[ -f "${BACKUP_DIR}/${encrypted_name}" ]]; then
-            size="$(human_size "$(stat -c%s "${BACKUP_DIR}/${encrypted_name}" 2>/dev/null || echo 0)")"
+            local raw_bytes
+            raw_bytes="$(stat -c%s "${BACKUP_DIR}/${encrypted_name}" 2>/dev/null || echo 0)"
+            size="$(human_size "$raw_bytes")"
+            SESSION_BACKUP_BYTES=$((SESSION_BACKUP_BYTES + raw_bytes))
         fi
         BACKUP_RESULTS+=("$service_name: ${size} (${service_duration}s)")
     fi
@@ -380,10 +387,8 @@ run_backup() {
         backup_service "$service_dir"
     done <<< "$services"
 
-    # Calculate total size of backup dir
-    if [[ -d "$BACKUP_DIR" ]]; then
-        TOTAL_BACKUP_SIZE="$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)"
-    fi
+    # Calculate total size of backups created this session
+    TOTAL_BACKUP_SIZE="$(human_size "$SESSION_BACKUP_BYTES")"
 
     # GFS Pruning (local)
     if ! $NO_PRUNE && ! $DRY_RUN; then
