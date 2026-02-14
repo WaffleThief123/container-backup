@@ -13,7 +13,6 @@
 #   --dry-run         Walk through all steps without actually archiving/transferring
 #   --no-prune        Skip GFS retention pruning
 #   --no-notify       Skip webhook notification
-#   -v, --verbose     Verbose output
 #   -h, --help        Show this help
 #
 # Restore mode:
@@ -24,7 +23,6 @@ set -euo pipefail
 
 # --- Constants ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_NAME="$(basename "$0")"
 DATE_STR=""  # set in run_backup from production server time
 LOG_TAG="docker-backup"
 
@@ -34,7 +32,6 @@ SINGLE_SERVICE=""
 DRY_RUN=false
 NO_PRUNE=false
 NO_NOTIFY=false
-VERBOSE=false
 
 # Subcommand
 SUBCOMMAND=""
@@ -109,10 +106,6 @@ parse_args() {
                 NO_NOTIFY=true
                 shift
                 ;;
-            -v|--verbose)
-                VERBOSE=true
-                shift
-                ;;
             --list)
                 RESTORE_LIST=true
                 # Optional service filter
@@ -156,7 +149,6 @@ Backup options:
   --dry-run         Walk through all steps without archiving/transferring
   --no-prune        Skip GFS retention pruning
   --no-notify       Skip webhook notification
-  -v, --verbose     Verbose output
   -h, --help        Show this help
 
 Restore options:
