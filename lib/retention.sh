@@ -30,14 +30,16 @@ day_of_week() {
 # GFS decisions are based on the date portion (YYYY-MM-DD) only.
 # Usage: apply_retention
 apply_retention() {
-    local today
-    today="$(date +%Y-%m-%d)"
-
     log_info "Applying GFS retention policy (daily=$RETAIN_DAILY, weekly=$RETAIN_WEEKLY, monthly=$RETAIN_MONTHLY)"
 
     # Get list of all backup files in local BACKUP_DIR
-    local local_files
-    local_files="$(ls -1 "${BACKUP_DIR}/" 2>/dev/null | grep '\.tar\.zst\.age$')"
+    local local_files=""
+    local f
+    for f in "${BACKUP_DIR}"/*.tar.zst.age; do
+        [[ -e "$f" ]] || continue
+        local_files+="${f##*/}"$'\n'
+    done
+    local_files="${local_files%$'\n'}"
 
     if [[ -z "$local_files" ]]; then
         log_info "No backups found in $BACKUP_DIR, nothing to prune"
@@ -46,7 +48,7 @@ apply_retention() {
 
     # Extract unique service names
     local services
-    services="$(echo "$local_files" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{6\}\.tar\.zst\.age$//' | sort -u)"
+    services="$(echo "$local_files" | sed 's/-[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\(_[0-9]\{6\}\)\{0,1\}\.tar\.zst\.age$//' | sort -u)"
 
     local total_pruned=0
 
@@ -82,7 +84,7 @@ prune_service_backups() {
 
     # Extract dates from filenames (strip time portion for GFS decisions)
     local dates
-    dates="$(echo "$service_files" | sed "s/^${service}-//;s/_[0-9]\{6\}\.tar\.zst\.age$//" | sort -ru)"
+    dates="$(echo "$service_files" | sed "s/^${service}-//;s/\(_[0-9]\{6\}\)\{0,1\}\.tar\.zst\.age$//" | sort -ru)"
 
     # Daily: keep the most recent N unique dates
     local daily_count=0
@@ -129,7 +131,7 @@ prune_service_backups() {
     while IFS= read -r f; do
         [[ -z "$f" ]] && continue
         local file_date
-        file_date="$(echo "$f" | sed "s/^${service}-//;s/_[0-9]\{6\}\.tar\.zst\.age$//")"
+        file_date="$(echo "$f" | sed "s/^${service}-//;s/\(_[0-9]\{6\}\)\{0,1\}\.tar\.zst\.age$//")"
 
         if [[ -z "${keep_dates[$file_date]+_}" ]]; then
             to_delete+=("$f")
